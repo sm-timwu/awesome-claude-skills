@@ -30,37 +30,58 @@ if (!(Test-Path $ServerSkillScript)) {
   throw "Server helper script not found: $ServerSkillScript"
 }
 
-$serverProcess = Start-Process -FilePath 'powershell' -ArgumentList @(
-  '-NoProfile',
-  '-ExecutionPolicy',
-  'Bypass',
-  '-File',
-  $ServerSkillScript
-) -PassThru -WindowStyle Hidden
+$portInUse = $false
+try {
+  $portInUse = (Get-NetTCPConnection -LocalPort 5001 -State Listen -ErrorAction Stop | Select-Object -First 1) -ne $null
+} catch {
+  $portInUse = (netstat -ano | Select-String -Pattern 'LISTENING\s+\S+:5001\s' -Quiet)
+}
+
+$serverProcess = $null
+if (-not $portInUse) {
+  Write-Output 'Port 5001 not in use. Starting layercake-server.'
+  $serverProcess = Start-Process -FilePath 'powershell' -ArgumentList @(
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    $ServerSkillScript
+  ) -PassThru -WindowStyle Hidden
+} else {
+  Write-Output 'Port 5001 already in use. Skipping layercake-server startup.'
+}
 
 $deadline = (Get-Date).AddSeconds($HealthTimeoutSec)
 $serverReady = $false
 
-while ((Get-Date) -lt $deadline) {
-  try {
-    $response = Invoke-RestMethod -Method Get -Uri $HealthUrl -TimeoutSec 5
-    if ($null -ne $response -and $response.status -eq 'healthy') {
-      $serverReady = $true
+if (-not $portInUse) {
+  $healthLogEmitted = $false
+  while ((Get-Date) -lt $deadline) {
+    if (-not $serverReady -and -not $healthLogEmitted) {
+      Write-Output "Waiting for health check: $HealthUrl"
+      $healthLogEmitted = $true
+    }
+    try {
+      $response = Invoke-RestMethod -Method Get -Uri $HealthUrl -TimeoutSec 5
+      if ($null -ne $response -and $response.status -eq 'healthy') {
+        $serverReady = $true
+        break
+      }
+    } catch {
+      # Keep polling until timeout
+    }
+
+    if ($serverProcess.HasExited) {
+      Write-Output 'Server process exited before health check passed. Continuing to run evals.'
       break
     }
-  } catch {
-    # Keep polling until timeout
+
+    Start-Sleep -Seconds $HealthPollSec
   }
 
-  if ($serverProcess.HasExited) {
-    throw "Server process exited before health check passed."
+  if (-not $serverReady) {
+    Write-Output "Server did not become healthy within $HealthTimeoutSec seconds. Continuing to run evals."
   }
-
-  Start-Sleep -Seconds $HealthPollSec
-}
-
-if (-not $serverReady) {
-  throw "Server did not become healthy within $HealthTimeoutSec seconds."
 }
 
 $evalStart = Get-Date

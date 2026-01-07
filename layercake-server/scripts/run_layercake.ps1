@@ -18,5 +18,14 @@ if (!(Test-Path $serverPath)) {
 }
 
 Set-Location $RepoPath
-. $activatePath
-python $serverPath
+$psCommand = @"
+Set-Location '$RepoPath'
+. '$activatePath'
+python '$serverPath'
+"@
+
+Start-Process powershell -ArgumentList @(
+  '-NoExit',
+  '-ExecutionPolicy', 'Bypass',
+  '-Command', $psCommand
+)
